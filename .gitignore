@@ -18,7 +18,10 @@
 /public/storage
 /storage/*.key
 /storage/pail
+/storage/logs/*
+/storage/framework/*
 /vendor
+/database/*.sqlite
 Homestead.json
 Homestead.yaml
 Thumbs.db
