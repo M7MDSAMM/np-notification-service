@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Middleware\CorrelationIdMiddleware;
+use App\Http\Middleware\JwtAdminAuthMiddleware;
 use App\Http\Responses\ApiResponse;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Auth\AuthenticationException;
@@ -23,6 +24,9 @@ return Application::configure(basePath: dirname(__DIR__))
     )
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->append(CorrelationIdMiddleware::class);
+        $middleware->alias([
+            'jwt.admin' => JwtAdminAuthMiddleware::class,
+        ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         $exceptions->shouldRenderJsonWhen(fn (Request $request) => $request->is('api/*') || $request->expectsJson());
