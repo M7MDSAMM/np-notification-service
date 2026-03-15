@@ -25,7 +25,16 @@ class NotificationOrchestratorService implements NotificationOrchestratorInterfa
     {
         $token = request()->bearerToken();
         $correlationId = request()->header('X-Correlation-Id', '');
+        $adminUuid = request()->attributes->get('auth_admin_uuid');
         $userUuid = $payload['user_uuid'];
+
+        Log::info('notification.orchestration.started', [
+            'user_uuid'         => $userUuid,
+            'template_key'      => $payload['template_key'],
+            'channels'          => $payload['channels'],
+            'correlation_id'    => $correlationId,
+            'acting_admin_uuid' => $adminUuid,
+        ]);
 
         // 1. Idempotency check
         if (! empty($payload['idempotency_key'])) {
@@ -52,6 +61,11 @@ class NotificationOrchestratorService implements NotificationOrchestratorInterfa
                 $correlationId,
             );
         }
+
+        Log::info('notification.user.validated', [
+            'user_uuid'      => $userUuid,
+            'correlation_id' => $correlationId,
+        ]);
 
         // 3. Fetch preferences and filter channels
         $preferences = $this->userClient->fetchPreferences($token, $userUuid);
@@ -93,6 +107,13 @@ class NotificationOrchestratorService implements NotificationOrchestratorInterfa
             $payload['variables'] ?? [],
         );
 
+        Log::info('notification.template.rendered', [
+            'user_uuid'         => $userUuid,
+            'template_key'      => $payload['template_key'],
+            'correlation_id'    => $correlationId,
+            'acting_admin_uuid' => $adminUuid,
+        ]);
+
         // 6. Create notification
         $notification = Notification::create([
             'user_uuid'       => $userUuid,
@@ -101,14 +122,6 @@ class NotificationOrchestratorService implements NotificationOrchestratorInterfa
             'variables'       => $payload['variables'] ?? [],
             'status'          => 'queued',
             'idempotency_key' => $payload['idempotency_key'] ?? null,
-        ]);
-
-        Log::info('notification.created', [
-            'notification_uuid' => $notification->uuid,
-            'user_uuid'         => $userUuid,
-            'template_key'      => $notification->template_key,
-            'correlation_id'    => $correlationId,
-            'acting_admin_uuid' => request()->attributes->get('auth_admin_uuid'),
         ]);
 
         // 7. Store idempotency key
@@ -121,34 +134,43 @@ class NotificationOrchestratorService implements NotificationOrchestratorInterfa
             ]);
         }
 
-        // 8. Create attempts for each channel
-        $attempts = [];
+        // 8. Create notification attempts for each channel
         foreach ($channels as $channel) {
-            $attempts[] = NotificationAttempt::create([
+            NotificationAttempt::create([
                 'notification_uuid' => $notification->uuid,
                 'channel'           => $channel,
                 'status'            => 'pending',
             ]);
         }
 
-        // 9. Dispatch to Messaging Service
+        // 9. Build delivery payload per channel
+        $deliveryItems = $this->buildDeliveryItems($channels, $user, $rendered, $payload);
+
+        $deliveryPayload = [
+            'notification_uuid' => $notification->uuid,
+            'user_uuid'         => $userUuid,
+            'deliveries'        => $deliveryItems,
+        ];
+
+        // 10. Call Messaging Service
         try {
-            $messagingPayload = [
+            $messagingResponse = $this->messagingClient->createDeliveries($token, $deliveryPayload);
+
+            $notification->update([
+                'status'              => 'queued',
+                'delivery_references' => $messagingResponse['deliveries'] ?? [],
+            ]);
+
+            NotificationAttempt::where('notification_uuid', $notification->uuid)
+                ->update(['status' => 'pending']);
+
+            Log::info('notification.messaging.dispatched', [
                 'notification_uuid' => $notification->uuid,
                 'user_uuid'         => $userUuid,
                 'channels'          => $channels,
-                'subject'           => $rendered['subject'] ?? '',
-                'content'           => $rendered['content'] ?? '',
-                'template_key'      => $payload['template_key'],
-            ];
-
-            $this->messagingClient->send($token, $messagingPayload);
-
-            // Update notification and attempts to sent
-            $notification->update(['status' => 'sent']);
-
-            NotificationAttempt::where('notification_uuid', $notification->uuid)
-                ->update(['status' => 'sent']);
+                'correlation_id'    => $correlationId,
+                'acting_admin_uuid' => $adminUuid,
+            ]);
         } catch (ExternalServiceException $e) {
             $notification->update([
                 'status'     => 'failed',
@@ -161,16 +183,48 @@ class NotificationOrchestratorService implements NotificationOrchestratorInterfa
                     'error_message' => $e->getMessage(),
                 ]);
 
-            Log::warning('notification.send_failed', [
+            Log::error('notification.failed', [
                 'notification_uuid' => $notification->uuid,
+                'user_uuid'         => $userUuid,
                 'error'             => $e->getMessage(),
                 'correlation_id'    => $correlationId,
+                'acting_admin_uuid' => $adminUuid,
             ]);
         }
 
-        // 10. Return notification with attempts
+        // 11. Return notification with attempts
         $notification->refresh();
 
         return $notification->load('attempts')->toArray();
+    }
+
+    /**
+     * Build per-channel delivery items using user data and rendered template.
+     */
+    private function buildDeliveryItems(array $channels, array $user, array $rendered, array $payload): array
+    {
+        $items = [];
+
+        foreach ($channels as $channel) {
+            $recipient = match ($channel) {
+                'email'    => $user['email'] ?? null,
+                'whatsapp' => $user['phone_e164'] ?? null,
+                'push'     => $user['device_token'] ?? null,
+                default    => null,
+            };
+
+            $items[] = [
+                'channel'   => $channel,
+                'recipient' => $recipient,
+                'subject'   => $rendered['subject'] ?? '',
+                'content'   => $rendered['content'] ?? '',
+                'payload'   => [
+                    'template_key' => $payload['template_key'],
+                    'variables'    => $payload['variables'] ?? [],
+                ],
+            ];
+        }
+
+        return $items;
     }
 }
