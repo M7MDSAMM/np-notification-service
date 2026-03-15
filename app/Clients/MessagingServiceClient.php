@@ -17,14 +17,14 @@ class MessagingServiceClient implements MessagingServiceClientInterface
         $this->baseUrl = rtrim(config('services.messaging_service.base_url'), '/').'/';
     }
 
-    public function send(string $token, array $payload): array
+    public function createDeliveries(string $token, array $payload): array
     {
         $response = $this->timedRequest(
-            fn () => $this->authenticatedRequest($token)->post('messages/send', $payload),
-            'messages/send',
+            fn () => $this->authenticatedRequest($token)->post('deliveries', $payload),
+            'deliveries',
             'POST',
         );
 
-        return $this->extractData($response, 'Failed to send message');
+        return $this->extractData($response, 'Failed to create deliveries');
     }
 }

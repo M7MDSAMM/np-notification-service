@@ -22,12 +22,14 @@ class Notification extends Model
         'idempotency_key',
         'scheduled_at',
         'last_error',
+        'delivery_references',
     ];
 
     protected $casts = [
-        'channels'     => 'array',
-        'variables'    => 'array',
-        'scheduled_at' => 'datetime',
+        'channels'            => 'array',
+        'variables'           => 'array',
+        'delivery_references' => 'array',
+        'scheduled_at'        => 'datetime',
     ];
 
     protected $hidden = ['id'];

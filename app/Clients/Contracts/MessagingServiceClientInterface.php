@@ -4,5 +4,5 @@ namespace App\Clients\Contracts;
 
 interface MessagingServiceClientInterface
 {
-    public function send(string $token, array $payload): array;
+    public function createDeliveries(string $token, array $payload): array;
 }
