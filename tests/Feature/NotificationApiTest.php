@@ -68,7 +68,10 @@ class NotificationApiTest extends TestCase
         $templateMock->shouldReceive('render')->andReturn(['subject' => 'Welcome!', 'content' => 'Hello']);
 
         $messagingMock = $this->mock(MessagingServiceClientInterface::class);
-        $messagingMock->shouldReceive('send')->andReturn(['message_id' => 'msg-1', 'status' => 'accepted']);
+        $messagingMock->shouldReceive('createDeliveries')->andReturn([
+            'notification_uuid' => $userUuid,
+            'deliveries'        => [['uuid' => 'del-1', 'channel' => 'email', 'status' => 'pending']],
+        ]);
 
         $payload = [
             'user_uuid'       => $userUuid,
