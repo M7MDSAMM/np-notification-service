@@ -48,19 +48,14 @@ final class ApiResponse
         int $status = 400,
         array $errors = [],
     ): JsonResponse {
-        $payload = [
+        return response()->json([
             'success'        => false,
             'message'        => $message,
+            'errors'         => $errors ?: (object) [],
             'error_code'     => $errorCode,
             'correlation_id' => request()->headers->get('X-Correlation-Id', ''),
             'meta'           => (object) [],
-        ];
-
-        if ($errors) {
-            $payload['errors'] = $errors;
-        }
-
-        return response()->json($payload, $status)
+        ], $status)
             ->header('X-Correlation-Id', request()->headers->get('X-Correlation-Id', ''));
     }
 

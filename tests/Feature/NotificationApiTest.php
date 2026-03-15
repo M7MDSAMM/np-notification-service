@@ -39,7 +39,7 @@ class NotificationApiTest extends TestCase
         $response->assertOk()
             ->assertHeader('X-Correlation-Id')
             ->assertJsonPath('success', true)
-            ->assertJsonStructure(['correlation_id']);
+            ->assertJsonStructure(['message', 'data', 'meta', 'correlation_id']);
     }
 
     public function test_notifications_require_auth(): void
@@ -49,7 +49,7 @@ class NotificationApiTest extends TestCase
         $response->assertUnauthorized()
             ->assertJsonPath('success', false)
             ->assertJsonPath('error_code', 'AUTH_INVALID')
-            ->assertJsonStructure(['correlation_id']);
+            ->assertJsonStructure(['message', 'errors', 'error_code', 'correlation_id', 'meta']);
     }
 
     public function test_authenticated_admin_can_create_notification(): void
@@ -132,7 +132,7 @@ class NotificationApiTest extends TestCase
         $response->assertStatus(422)
             ->assertJsonPath('success', false)
             ->assertJsonPath('error_code', 'VALIDATION_ERROR')
-            ->assertJsonStructure(['errors', 'correlation_id']);
+            ->assertJsonStructure(['message', 'errors', 'error_code', 'correlation_id', 'meta']);
     }
 
     private function makeToken(string $role = 'admin'): string
