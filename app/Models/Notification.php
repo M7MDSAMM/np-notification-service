@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Support\Str;
 
@@ -38,5 +39,10 @@ class Notification extends Model
                 $notification->uuid = (string) Str::uuid();
             }
         });
+    }
+
+    public function attempts(): HasMany
+    {
+        return $this->hasMany(NotificationAttempt::class, 'notification_uuid', 'uuid');
     }
 }
