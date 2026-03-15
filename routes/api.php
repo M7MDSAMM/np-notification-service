@@ -15,10 +15,12 @@ use App\Http\Controllers\NotificationController;
 */
 
 Route::get('/health', fn () => ApiResponse::success([
-    'service'   => 'notification-service',
-    'status'    => 'ok',
-    'timestamp' => now()->toIso8601String(),
-    'version'   => env('APP_VERSION') ?: trim((string) shell_exec('git rev-parse --short HEAD')) ?: 'unknown',
+    'service'          => 'notification-service',
+    'status'           => 'healthy',
+    'timestamp'        => now()->toIso8601String(),
+    'version'          => config('app.version', '1.0.0'),
+    'environment'      => app()->environment(),
+    'queue_connection' => config('queue.default'),
 ]));
 
 Route::middleware('jwt.admin')->group(function () {

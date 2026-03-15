@@ -54,7 +54,10 @@ return [
 
         'stack' => [
             'driver' => 'stack',
-            'channels' => explode(',', (string) env('LOG_STACK', 'single')),
+            'channels' => array_merge(
+                explode(',', (string) env('LOG_STACK', 'single')),
+                ['structured'],
+            ),
             'ignore_exceptions' => false,
         ],
 
@@ -121,6 +124,14 @@ return [
         'null' => [
             'driver' => 'monolog',
             'handler' => NullHandler::class,
+        ],
+
+        'structured' => [
+            'driver' => 'single',
+            'path' => storage_path('logs/laravel.json'),
+            'level' => env('LOG_LEVEL', 'debug'),
+            'tap' => [App\Logging\AddCommonContext::class],
+            'formatter' => Monolog\Formatter\JsonFormatter::class,
         ],
 
         'emergency' => [
