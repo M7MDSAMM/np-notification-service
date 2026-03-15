@@ -2,6 +2,9 @@
 
 namespace Tests\Feature;
 
+use App\Clients\Contracts\MessagingServiceClientInterface;
+use App\Clients\Contracts\TemplateServiceClientInterface;
+use App\Clients\Contracts\UserServiceClientInterface;
 use App\Models\Notification;
 use Firebase\JWT\JWT;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -52,9 +55,23 @@ class NotificationApiTest extends TestCase
     public function test_authenticated_admin_can_create_notification(): void
     {
         $token = $this->makeToken();
+        $userUuid = (string) Str::uuid();
+
+        // Mock service clients for orchestration
+        $userMock = $this->mock(UserServiceClientInterface::class);
+        $userMock->shouldReceive('fetchUser')->andReturn([
+            'uuid' => $userUuid, 'is_active' => true, 'name' => 'Test', 'email' => 'test@example.com',
+        ]);
+        $userMock->shouldReceive('fetchPreferences')->andReturn(['channels' => ['email', 'push']]);
+
+        $templateMock = $this->mock(TemplateServiceClientInterface::class);
+        $templateMock->shouldReceive('render')->andReturn(['subject' => 'Welcome!', 'content' => 'Hello']);
+
+        $messagingMock = $this->mock(MessagingServiceClientInterface::class);
+        $messagingMock->shouldReceive('send')->andReturn(['message_id' => 'msg-1', 'status' => 'accepted']);
 
         $payload = [
-            'user_uuid'       => (string) Str::uuid(),
+            'user_uuid'       => $userUuid,
             'template_key'    => 'welcome_email',
             'channels'        => ['email', 'push'],
             'variables'       => ['name' => 'Alex'],
@@ -72,7 +89,7 @@ class NotificationApiTest extends TestCase
 
         $this->assertDatabaseHas('notifications', [
             'template_key' => 'welcome_email',
-            'user_uuid'    => $payload['user_uuid'],
+            'user_uuid'    => $userUuid,
         ]);
     }
 
