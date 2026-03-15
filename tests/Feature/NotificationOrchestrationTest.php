@@ -8,38 +8,26 @@ use App\Clients\Contracts\UserServiceClientInterface;
 use App\Exceptions\ExternalServiceException;
 use App\Models\IdempotencyKey;
 use App\Models\Notification;
-use App\Models\NotificationAttempt;
-use Firebase\JWT\JWT;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Str;
+use Tests\Support\AssertsApiEnvelope;
+use Tests\Support\JwtHelper;
 use Tests\TestCase;
 
 class NotificationOrchestrationTest extends TestCase
 {
-    use RefreshDatabase;
-
-    private string $privateKey;
+    use RefreshDatabase, JwtHelper, AssertsApiEnvelope;
 
     protected function setUp(): void
     {
         parent::setUp();
-
-        [$private, $public] = $this->generateKeyPair();
-        $this->privateKey = $private;
-
-        config([
-            'jwt.keys.public_content' => $public,
-            'jwt.keys.public'         => null,
-            'jwt.issuer'              => 'user-service',
-            'jwt.audience'            => 'notification-platform',
-        ]);
+        $this->setUpJwt();
     }
 
     public function test_successful_full_orchestration(): void
     {
         $userUuid = (string) Str::uuid();
-        $token = $this->makeToken();
 
         $this->mockUserClient($userUuid, active: true, channels: ['email', 'push']);
         $this->mockTemplateClient();
@@ -53,12 +41,11 @@ class NotificationOrchestrationTest extends TestCase
             'idempotency_key' => 'idem-001',
         ];
 
-        $response = $this->withHeader('Authorization', "Bearer {$token}")
+        $response = $this->withHeader('Authorization', 'Bearer ' . $this->makeToken())
             ->postJson('/api/v1/notifications', $payload);
 
-        $response->assertCreated()
-            ->assertJsonPath('success', true)
-            ->assertJsonPath('data.status', 'queued')
+        $this->assertApiSuccess($response, 201);
+        $response->assertJsonPath('data.status', 'queued')
             ->assertJsonPath('data.template_key', 'welcome_email');
 
         $this->assertDatabaseHas('notifications', [
@@ -77,7 +64,6 @@ class NotificationOrchestrationTest extends TestCase
             'status'  => 'pending',
         ]);
 
-        // Verify delivery_references stored
         $notification = Notification::where('user_uuid', $userUuid)->first();
         $this->assertNotNull($notification->delivery_references);
     }
@@ -85,7 +71,6 @@ class NotificationOrchestrationTest extends TestCase
     public function test_messaging_service_failure(): void
     {
         $userUuid = (string) Str::uuid();
-        $token = $this->makeToken();
 
         $this->mockUserClient($userUuid, active: true, channels: ['email']);
         $this->mockTemplateClient();
@@ -95,15 +80,13 @@ class NotificationOrchestrationTest extends TestCase
             ->once()
             ->andThrow(new ExternalServiceException('Messaging service unavailable.', 502, [], 'SERVICE_UNAVAILABLE'));
 
-        $payload = [
-            'user_uuid'    => $userUuid,
-            'template_key' => 'welcome_email',
-            'channels'     => ['email'],
-            'variables'    => ['name' => 'Alex'],
-        ];
-
-        $response = $this->withHeader('Authorization', "Bearer {$token}")
-            ->postJson('/api/v1/notifications', $payload);
+        $response = $this->withHeader('Authorization', 'Bearer ' . $this->makeToken())
+            ->postJson('/api/v1/notifications', [
+                'user_uuid'    => $userUuid,
+                'template_key' => 'welcome_email',
+                'channels'     => ['email'],
+                'variables'    => ['name' => 'Alex'],
+            ]);
 
         $response->assertCreated()
             ->assertJsonPath('data.status', 'failed');
@@ -123,7 +106,6 @@ class NotificationOrchestrationTest extends TestCase
     public function test_idempotency_protection(): void
     {
         $userUuid = (string) Str::uuid();
-        $token = $this->makeToken();
 
         $this->mockUserClient($userUuid, active: true, channels: ['email']);
         $this->mockTemplateClient();
@@ -137,21 +119,18 @@ class NotificationOrchestrationTest extends TestCase
             'idempotency_key' => 'idem-dup',
         ];
 
-        // First request
-        $response1 = $this->withHeader('Authorization', "Bearer {$token}")
+        $response1 = $this->withHeader('Authorization', 'Bearer ' . $this->makeToken())
             ->postJson('/api/v1/notifications', $payload);
 
         $response1->assertCreated();
         $firstUuid = $response1->json('data.uuid');
 
-        // Second request — same idempotency key
-        $response2 = $this->withHeader('Authorization', "Bearer {$token}")
+        $response2 = $this->withHeader('Authorization', 'Bearer ' . $this->makeToken())
             ->postJson('/api/v1/notifications', $payload);
 
         $response2->assertCreated()
             ->assertJsonPath('data.uuid', $firstUuid);
 
-        // Only one notification in DB
         $this->assertSame(1, Notification::where('user_uuid', $userUuid)->count());
         $this->assertSame(1, IdempotencyKey::where('user_uuid', $userUuid)->count());
     }
@@ -159,47 +138,60 @@ class NotificationOrchestrationTest extends TestCase
     public function test_user_not_found(): void
     {
         $userUuid = (string) Str::uuid();
-        $token = $this->makeToken();
 
         $mock = $this->mock(UserServiceClientInterface::class);
         $mock->shouldReceive('fetchUser')
             ->once()
             ->andThrow(new ExternalServiceException('User not found.', 404, [], 'NOT_FOUND'));
 
-        $payload = [
-            'user_uuid'    => $userUuid,
-            'template_key' => 'welcome_email',
-            'channels'     => ['email'],
-            'variables'    => ['name' => 'Alex'],
-        ];
+        $response = $this->withHeader('Authorization', 'Bearer ' . $this->makeToken())
+            ->postJson('/api/v1/notifications', [
+                'user_uuid'    => $userUuid,
+                'template_key' => 'welcome_email',
+                'channels'     => ['email'],
+                'variables'    => ['name' => 'Alex'],
+            ]);
 
-        $response = $this->withHeader('Authorization', "Bearer {$token}")
-            ->postJson('/api/v1/notifications', $payload);
+        $this->assertApiError($response, 404, 'NOT_FOUND');
+        $this->assertDatabaseMissing('notifications', ['user_uuid' => $userUuid]);
+    }
 
-        $response->assertStatus(404)
-            ->assertJsonPath('success', false)
-            ->assertJsonPath('error_code', 'NOT_FOUND');
+    public function test_inactive_user_returns_error(): void
+    {
+        $userUuid = (string) Str::uuid();
 
+        $mock = $this->mock(UserServiceClientInterface::class);
+        $mock->shouldReceive('fetchUser')
+            ->andReturn([
+                'uuid' => $userUuid, 'is_active' => false,
+                'name' => 'Inactive', 'email' => 'inactive@example.com',
+            ]);
+
+        $response = $this->withHeader('Authorization', 'Bearer ' . $this->makeToken())
+            ->postJson('/api/v1/notifications', [
+                'user_uuid'    => $userUuid,
+                'template_key' => 'welcome_email',
+                'channels'     => ['email'],
+                'variables'    => ['name' => 'Alex'],
+            ]);
+
+        $response->assertStatus(422);
         $this->assertDatabaseMissing('notifications', ['user_uuid' => $userUuid]);
     }
 
     public function test_disabled_channel_returns_error(): void
     {
         $userUuid = (string) Str::uuid();
-        $token = $this->makeToken();
 
-        // User only allows 'push', but we request 'email'
         $this->mockUserClient($userUuid, active: true, channels: ['push']);
 
-        $payload = [
-            'user_uuid'    => $userUuid,
-            'template_key' => 'welcome_email',
-            'channels'     => ['email'],
-            'variables'    => ['name' => 'Alex'],
-        ];
-
-        $response = $this->withHeader('Authorization', "Bearer {$token}")
-            ->postJson('/api/v1/notifications', $payload);
+        $response = $this->withHeader('Authorization', 'Bearer ' . $this->makeToken())
+            ->postJson('/api/v1/notifications', [
+                'user_uuid'    => $userUuid,
+                'template_key' => 'welcome_email',
+                'channels'     => ['email'],
+                'variables'    => ['name' => 'Alex'],
+            ]);
 
         $response->assertStatus(422)
             ->assertJsonPath('error_code', 'NO_CHANNELS_AVAILABLE');
@@ -208,21 +200,18 @@ class NotificationOrchestrationTest extends TestCase
     public function test_rate_limit_exceeded(): void
     {
         $userUuid = (string) Str::uuid();
-        $token = $this->makeToken();
 
         Cache::put("notifications:user:{$userUuid}", 5, now()->addMinute());
 
         $this->mockUserClient($userUuid, active: true, channels: ['email']);
 
-        $payload = [
-            'user_uuid'    => $userUuid,
-            'template_key' => 'welcome_email',
-            'channels'     => ['email'],
-            'variables'    => ['name' => 'Alex'],
-        ];
-
-        $response = $this->withHeader('Authorization', "Bearer {$token}")
-            ->postJson('/api/v1/notifications', $payload);
+        $response = $this->withHeader('Authorization', 'Bearer ' . $this->makeToken())
+            ->postJson('/api/v1/notifications', [
+                'user_uuid'    => $userUuid,
+                'template_key' => 'welcome_email',
+                'channels'     => ['email'],
+                'variables'    => ['name' => 'Alex'],
+            ]);
 
         $response->assertStatus(429)
             ->assertJsonPath('success', false)
@@ -232,12 +221,10 @@ class NotificationOrchestrationTest extends TestCase
     public function test_delivery_payload_includes_recipient_from_user_data(): void
     {
         $userUuid = (string) Str::uuid();
-        $token = $this->makeToken();
 
         $this->mockUserClient($userUuid, active: true, channels: ['email']);
         $this->mockTemplateClient();
 
-        // Capture the payload sent to messaging service
         $messagingMock = $this->mock(MessagingServiceClientInterface::class);
         $messagingMock->shouldReceive('createDeliveries')
             ->once()
@@ -252,17 +239,38 @@ class NotificationOrchestrationTest extends TestCase
                 'deliveries'        => [['uuid' => 'del-1', 'channel' => 'email', 'status' => 'pending']],
             ]);
 
-        $payload = [
-            'user_uuid'    => $userUuid,
-            'template_key' => 'welcome_email',
-            'channels'     => ['email'],
-            'variables'    => ['name' => 'Alex'],
-        ];
-
-        $response = $this->withHeader('Authorization', "Bearer {$token}")
-            ->postJson('/api/v1/notifications', $payload);
+        $response = $this->withHeader('Authorization', 'Bearer ' . $this->makeToken())
+            ->postJson('/api/v1/notifications', [
+                'user_uuid'    => $userUuid,
+                'template_key' => 'welcome_email',
+                'channels'     => ['email'],
+                'variables'    => ['name' => 'Alex'],
+            ]);
 
         $response->assertCreated();
+    }
+
+    public function test_template_service_failure_returns_error(): void
+    {
+        $userUuid = (string) Str::uuid();
+
+        $this->mockUserClient($userUuid, active: true, channels: ['email']);
+
+        $templateMock = $this->mock(TemplateServiceClientInterface::class);
+        $templateMock->shouldReceive('render')
+            ->once()
+            ->andThrow(new ExternalServiceException('Template not found.', 404, [], 'NOT_FOUND'));
+
+        $response = $this->withHeader('Authorization', 'Bearer ' . $this->makeToken())
+            ->postJson('/api/v1/notifications', [
+                'user_uuid'    => $userUuid,
+                'template_key' => 'nonexistent_template',
+                'channels'     => ['email'],
+                'variables'    => ['name' => 'Alex'],
+            ]);
+
+        $response->assertStatus(404)
+            ->assertJsonPath('success', false);
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────
@@ -281,15 +289,12 @@ class NotificationOrchestrationTest extends TestCase
             ]);
 
         $mock->shouldReceive('fetchPreferences')
-            ->andReturn([
-                'channels' => $channels,
-            ]);
+            ->andReturn(['channels' => $channels]);
     }
 
     private function mockTemplateClient(): void
     {
         $mock = $this->mock(TemplateServiceClientInterface::class);
-
         $mock->shouldReceive('render')
             ->andReturn([
                 'subject' => 'Welcome!',
@@ -300,7 +305,6 @@ class NotificationOrchestrationTest extends TestCase
     private function mockMessagingClient(): void
     {
         $mock = $this->mock(MessagingServiceClientInterface::class);
-
         $mock->shouldReceive('createDeliveries')
             ->andReturn([
                 'notification_uuid' => 'notif-uuid',
@@ -308,35 +312,5 @@ class NotificationOrchestrationTest extends TestCase
                     ['uuid' => 'del-1', 'channel' => 'email', 'status' => 'pending'],
                 ],
             ]);
-    }
-
-    private function makeToken(string $role = 'admin'): string
-    {
-        $now = time();
-        $payload = [
-            'iss'  => 'user-service',
-            'aud'  => 'notification-platform',
-            'sub'  => 'admin-uuid',
-            'typ'  => 'admin',
-            'role' => $role,
-            'iat'  => $now,
-            'exp'  => $now + 3600,
-        ];
-
-        return JWT::encode($payload, $this->privateKey, 'RS256');
-    }
-
-    private function generateKeyPair(): array
-    {
-        $res = openssl_pkey_new([
-            'private_key_bits' => 2048,
-            'private_key_type' => OPENSSL_KEYTYPE_RSA,
-        ]);
-
-        openssl_pkey_export($res, $privateKey);
-        $pub       = openssl_pkey_get_details($res);
-        $publicKey = $pub['key'];
-
-        return [$privateKey, $publicKey];
     }
 }

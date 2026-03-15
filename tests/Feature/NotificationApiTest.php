@@ -6,50 +6,44 @@ use App\Clients\Contracts\MessagingServiceClientInterface;
 use App\Clients\Contracts\TemplateServiceClientInterface;
 use App\Clients\Contracts\UserServiceClientInterface;
 use App\Models\Notification;
-use Firebase\JWT\JWT;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Str;
+use Tests\Support\AssertsApiEnvelope;
+use Tests\Support\JwtHelper;
 use Tests\TestCase;
 
 class NotificationApiTest extends TestCase
 {
-    use RefreshDatabase;
-
-    private string $privateKey;
+    use RefreshDatabase, JwtHelper, AssertsApiEnvelope;
 
     protected function setUp(): void
     {
         parent::setUp();
-
-        [$private, $public] = $this->generateKeyPair();
-        $this->privateKey = $private;
-
-        config([
-            'jwt.keys.public_content' => $public,
-            'jwt.keys.public'         => null,
-            'jwt.issuer'              => 'user-service',
-            'jwt.audience'            => 'notification-platform',
-        ]);
+        $this->setUpJwt();
     }
 
     public function test_health_returns_envelope_and_correlation(): void
     {
         $response = $this->getJson('/api/v1/health');
 
-        $response->assertOk()
-            ->assertHeader('X-Correlation-Id')
-            ->assertJsonPath('success', true)
-            ->assertJsonStructure(['message', 'data', 'meta', 'correlation_id']);
+        $this->assertApiSuccess($response);
+        $response->assertHeader('X-Correlation-Id')
+            ->assertJsonPath('data.service', 'notification-service');
     }
 
     public function test_notifications_require_auth(): void
     {
         $response = $this->postJson('/api/v1/notifications', []);
 
-        $response->assertUnauthorized()
-            ->assertJsonPath('success', false)
-            ->assertJsonPath('error_code', 'AUTH_INVALID')
-            ->assertJsonStructure(['message', 'errors', 'error_code', 'correlation_id', 'meta']);
+        $this->assertApiError($response, 401, 'AUTH_INVALID');
+    }
+
+    public function test_malformed_token_returns_401(): void
+    {
+        $response = $this->withToken('not-a-valid-jwt')
+            ->postJson('/api/v1/notifications', []);
+
+        $this->assertApiError($response, 401, 'AUTH_INVALID');
     }
 
     public function test_authenticated_admin_can_create_notification(): void
@@ -57,21 +51,7 @@ class NotificationApiTest extends TestCase
         $token = $this->makeToken();
         $userUuid = (string) Str::uuid();
 
-        // Mock service clients for orchestration
-        $userMock = $this->mock(UserServiceClientInterface::class);
-        $userMock->shouldReceive('fetchUser')->andReturn([
-            'uuid' => $userUuid, 'is_active' => true, 'name' => 'Test', 'email' => 'test@example.com',
-        ]);
-        $userMock->shouldReceive('fetchPreferences')->andReturn(['channels' => ['email', 'push']]);
-
-        $templateMock = $this->mock(TemplateServiceClientInterface::class);
-        $templateMock->shouldReceive('render')->andReturn(['subject' => 'Welcome!', 'content' => 'Hello']);
-
-        $messagingMock = $this->mock(MessagingServiceClientInterface::class);
-        $messagingMock->shouldReceive('createDeliveries')->andReturn([
-            'notification_uuid' => $userUuid,
-            'deliveries'        => [['uuid' => 'del-1', 'channel' => 'email', 'status' => 'pending']],
-        ]);
+        $this->mockServiceClients($userUuid);
 
         $payload = [
             'user_uuid'       => $userUuid,
@@ -84,11 +64,9 @@ class NotificationApiTest extends TestCase
         $response = $this->withHeader('Authorization', "Bearer {$token}")
             ->postJson('/api/v1/notifications', $payload);
 
-        $response->assertCreated()
-            ->assertHeader('X-Correlation-Id')
-            ->assertJsonPath('success', true)
-            ->assertJsonPath('data.template_key', 'welcome_email')
-            ->assertJsonStructure(['correlation_id']);
+        $this->assertApiSuccess($response, 201);
+        $response->assertJsonPath('data.template_key', 'welcome_email')
+            ->assertHeader('X-Correlation-Id');
 
         $this->assertDatabaseHas('notifications', [
             'template_key' => 'welcome_email',
@@ -108,11 +86,18 @@ class NotificationApiTest extends TestCase
         ]);
 
         $response = $this->withHeader('Authorization', "Bearer {$token}")
-            ->getJson('/api/v1/notifications/'.$notification->uuid);
+            ->getJson('/api/v1/notifications/' . $notification->uuid);
 
-        $response->assertOk()
-            ->assertJsonPath('data.uuid', $notification->uuid)
-            ->assertJsonStructure(['correlation_id']);
+        $this->assertApiSuccess($response);
+        $response->assertJsonPath('data.uuid', $notification->uuid);
+    }
+
+    public function test_fetch_nonexistent_returns_404(): void
+    {
+        $response = $this->withHeader('Authorization', 'Bearer ' . $this->makeToken())
+            ->getJson('/api/v1/notifications/nonexistent-uuid');
+
+        $this->assertApiError($response, 404, 'NOT_FOUND');
     }
 
     public function test_validation_errors_return_422_envelope(): void
@@ -122,46 +107,42 @@ class NotificationApiTest extends TestCase
         $payload = [
             'user_uuid'    => (string) Str::uuid(),
             'template_key' => 'welcome_email',
-            'channels'     => [], // invalid: min 1
+            'channels'     => [],
             'variables'    => ['name' => 'Alex'],
         ];
 
         $response = $this->withHeader('Authorization', "Bearer {$token}")
             ->postJson('/api/v1/notifications', $payload);
 
-        $response->assertStatus(422)
-            ->assertJsonPath('success', false)
-            ->assertJsonPath('error_code', 'VALIDATION_ERROR')
-            ->assertJsonStructure(['message', 'errors', 'error_code', 'correlation_id', 'meta']);
+        $this->assertApiError($response, 422, 'VALIDATION_ERROR');
     }
 
-    private function makeToken(string $role = 'admin'): string
+    public function test_list_notifications_returns_data(): void
     {
-        $now = time();
-        $payload = [
-            'iss'  => 'user-service',
-            'aud'  => 'notification-platform',
-            'sub'  => 'admin-uuid',
-            'typ'  => 'admin',
-            'role' => $role,
-            'iat'  => $now,
-            'exp'  => $now + 3600,
-        ];
+        $response = $this->withHeader('Authorization', 'Bearer ' . $this->makeToken())
+            ->getJson('/api/v1/notifications');
 
-        return JWT::encode($payload, $this->privateKey, 'RS256');
+        $this->assertApiSuccess($response);
+        $this->assertIsArray($response->json('data'));
     }
 
-    private function generateKeyPair(): array
+    // ── Helpers ──────────────────────────────────────────────────────────
+
+    private function mockServiceClients(string $userUuid): void
     {
-        $res = openssl_pkey_new([
-            'private_key_bits' => 2048,
-            'private_key_type' => OPENSSL_KEYTYPE_RSA,
+        $userMock = $this->mock(UserServiceClientInterface::class);
+        $userMock->shouldReceive('fetchUser')->andReturn([
+            'uuid' => $userUuid, 'is_active' => true, 'name' => 'Test', 'email' => 'test@example.com',
         ]);
+        $userMock->shouldReceive('fetchPreferences')->andReturn(['channels' => ['email', 'push']]);
 
-        openssl_pkey_export($res, $privateKey);
-        $pub        = openssl_pkey_get_details($res);
-        $publicKey  = $pub['key'];
+        $templateMock = $this->mock(TemplateServiceClientInterface::class);
+        $templateMock->shouldReceive('render')->andReturn(['subject' => 'Welcome!', 'content' => 'Hello']);
 
-        return [$privateKey, $publicKey];
+        $messagingMock = $this->mock(MessagingServiceClientInterface::class);
+        $messagingMock->shouldReceive('createDeliveries')->andReturn([
+            'notification_uuid' => $userUuid,
+            'deliveries'        => [['uuid' => 'del-1', 'channel' => 'email', 'status' => 'pending']],
+        ]);
     }
 }
