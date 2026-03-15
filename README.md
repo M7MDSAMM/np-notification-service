@@ -1,59 +1,117 @@
-<p align="center"><a href="https://laravel.com" target="_blank"><img src="https://raw.githubusercontent.com/laravel/art/master/logo-lockup/5%20SVG/2%20CMYK/1%20Full%20Color/laravel-logolockup-cmyk-red.svg" width="400" alt="Laravel Logo"></a></p>
+# Notification Service (Port 8002)
 
-<p align="center">
-<a href="https://github.com/laravel/framework/actions"><img src="https://github.com/laravel/framework/workflows/tests/badge.svg" alt="Build Status"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/dt/laravel/framework" alt="Total Downloads"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/v/laravel/framework" alt="Latest Stable Version"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/l/laravel/framework" alt="License"></a>
-</p>
+Stateless Laravel 12 JSON API that serves as the **orchestration hub** of the Notification Platform. It coordinates across User Service, Template Service, and Messaging Service to validate users, render templates, enforce rate limits, and dispatch multi-channel notifications — all with idempotency protection.
 
-## About Laravel
+## Responsibilities
 
-Laravel is a web application framework with expressive, elegant syntax. We believe development must be an enjoyable and creative experience to be truly fulfilling. Laravel takes the pain out of development by easing common tasks used in many web projects, such as:
+- Notification creation with full orchestration: validate user, check preferences, render template, dispatch delivery.
+- Idempotency protection via `(user_uuid, idempotency_key)` composite uniqueness.
+- Per-user rate limiting (5 notifications/minute).
+- Notification status tracking (queued / sent / failed).
+- Per-channel delivery attempt tracking with provider details.
+- Notification retry support.
+- Notification listing with filters (status, user_uuid, template_key).
 
-- [Simple, fast routing engine](https://laravel.com/docs/routing).
-- [Powerful dependency injection container](https://laravel.com/docs/container).
-- Multiple back-ends for [session](https://laravel.com/docs/session) and [cache](https://laravel.com/docs/cache) storage.
-- Expressive, intuitive [database ORM](https://laravel.com/docs/eloquent).
-- Database agnostic [schema migrations](https://laravel.com/docs/migrations).
-- [Robust background job processing](https://laravel.com/docs/queues).
-- [Real-time event broadcasting](https://laravel.com/docs/broadcasting).
+## Database
 
-Laravel is accessible, powerful, and provides tools required for large, robust applications.
+**Database:** `np_notification_service`
 
-## Learning Laravel
+| Table | Purpose |
+|-------|---------|
+| `notifications` | Core notification records: user, template, channels, variables, status, delivery references |
+| `idempotency_keys` | Deduplication records keyed by `(user_uuid, idempotency_key)` with request hash |
+| `notification_attempts` | Per-channel attempt records with status, provider, and error tracking |
+| `cache` | Laravel cache (used for rate limiting) |
+| `jobs` | Laravel queue jobs (standard) |
 
-Laravel has the most extensive and thorough [documentation](https://laravel.com/docs) and video tutorial library of all modern web application frameworks, making it a breeze to get started with the framework. You can also check out [Laravel Learn](https://laravel.com/learn), where you will be guided through building a modern Laravel application.
+## API Endpoints
 
-If you don't feel like reading, [Laracasts](https://laracasts.com) can help. Laracasts contains thousands of video tutorials on a range of topics including Laravel, modern PHP, unit testing, and JavaScript. Boost your skills by digging into our comprehensive video library.
+All routes are prefixed with `/api/v1` and require JWT authentication.
 
-## Laravel Sponsors
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/health` | Service health check |
+| `GET` | `/notifications` | List notifications (filterable by status, user_uuid, template_key) |
+| `POST` | `/notifications` | Create and orchestrate a notification |
+| `GET` | `/notifications/{uuid}` | Get notification details with attempts |
+| `POST` | `/notifications/{uuid}/retry` | Retry a failed notification |
 
-We would like to extend our thanks to the following sponsors for funding Laravel development. If you are interested in becoming a sponsor, please visit the [Laravel Partners program](https://partners.laravel.com).
+### Create Notification Payload
 
-### Premium Partners
+```json
+{
+  "user_uuid": "uuid",
+  "template_key": "welcome_email",
+  "channels": ["email", "push"],
+  "variables": { "name": "Alex" },
+  "idempotency_key": "optional-unique-key"
+}
+```
 
-- **[Vehikl](https://vehikl.com)**
-- **[Tighten Co.](https://tighten.co)**
-- **[Kirschbaum Development Group](https://kirschbaumdevelopment.com)**
-- **[64 Robots](https://64robots.com)**
-- **[Curotec](https://www.curotec.com/services/technologies/laravel)**
-- **[DevSquad](https://devsquad.com/hire-laravel-developers)**
-- **[Redberry](https://redberry.international/laravel-development)**
-- **[Active Logic](https://activelogic.com)**
+## Orchestration Flow
 
-## Contributing
+When a notification is created, the service executes this pipeline:
 
-Thank you for considering contributing to the Laravel framework! The contribution guide can be found in the [Laravel documentation](https://laravel.com/docs/contributions).
+1. **Idempotency check** — if `idempotency_key` is provided and already exists, return the existing notification.
+2. **Validate user** — call User Service to verify the user exists and is active.
+3. **Fetch preferences** — call User Service for the user's channel preferences; intersect with requested channels.
+4. **Rate limiting** — enforce 5 notifications/minute per user via cache throttle.
+5. **Render template** — call Template Service to compile subject/body with provided variables.
+6. **Create notification** — persist notification record with status `queued`.
+7. **Store idempotency key** — persist deduplication record with request hash.
+8. **Create attempts** — create `NotificationAttempt` records for each channel.
+9. **Dispatch to Messaging Service** — send delivery requests with per-channel recipient/content data.
+10. **Update status** — mark notification as `sent` or `failed` based on messaging response.
 
-## Code of Conduct
+## Architecture
 
-In order to ensure that the Laravel community is welcoming to all, please review and abide by the [Code of Conduct](https://laravel.com/docs/contributions#code-of-conduct).
+- **Tech**: Laravel 12, PHP 8.2, MySQL.
+- **Auth**: RS256 JWT validation via `JwtAdminAuthMiddleware`. Tokens are issued by User Service.
+- **Middleware**:
+  - `CorrelationIdMiddleware` — propagates `X-Correlation-Id` across all requests and outbound calls.
+  - `RequestTimingMiddleware` — logs structured JSON with method, route, status, latency, actor.
+  - `JwtAdminAuthMiddleware` — validates Bearer token.
+- **Service Clients**: `UserServiceClient`, `TemplateServiceClient`, `MessagingServiceClient` — all use the `MakesHttpRequests` trait for consistent HTTP handling, token forwarding, correlation ID propagation, latency logging, and error extraction.
+- **Responses**: Standardized API envelope (`success`, `message`, `data`, `meta`, `correlation_id`).
 
-## Security Vulnerabilities
+## Inter-Service Dependencies
 
-If you discover a security vulnerability within Laravel, please send an e-mail to Taylor Otwell via [taylor@laravel.com](mailto:taylor@laravel.com). All security vulnerabilities will be promptly addressed.
+| Service | Purpose |
+|---------|---------|
+| User Service (8001) | Validate user existence/activity, fetch channel preferences and contact info |
+| Template Service (8004) | Render template with variables |
+| Messaging Service (8003) | Dispatch per-channel delivery requests |
 
-## License
+## Local Setup
 
-The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).
+```bash
+cp .env.example .env
+composer install
+php artisan key:generate
+php artisan migrate
+php artisan serve --port=8002
+```
+
+Requires MySQL with database `np_notification_service` created. Configure service URLs in `.env`:
+
+```env
+USER_SERVICE_URL=http://localhost:8001/api/v1
+MESSAGING_SERVICE_URL=http://localhost:8003/api/v1
+TEMPLATE_SERVICE_URL=http://localhost:8004/api/v1
+```
+
+## Testing
+
+```bash
+php artisan test
+```
+
+Tests run against MySQL database `np_notification_service_test` (configured in `phpunit.xml`). External service calls are mocked via Laravel's service container.
+
+**Test coverage:** 17 tests, 117 assertions — covers orchestration flow, idempotency, rate limiting, external service failures, validation, auth, and retry.
+
+## Notes
+
+- The orchestrator forwards the admin's Bearer token and correlation ID to all downstream service calls.
+- If a user's preferences exclude all requested channels, the notification is rejected before creation.
+- `ExternalServiceException` surfaces downstream errors with original status codes and error codes.
