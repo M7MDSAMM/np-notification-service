@@ -1,5 +1,6 @@
 <?php
 
+use App\Exceptions\ExternalServiceException;
 use App\Http\Middleware\CorrelationIdMiddleware;
 use App\Http\Middleware\JwtAdminAuthMiddleware;
 use App\Http\Responses\ApiResponse;
@@ -52,6 +53,17 @@ return Application::configure(basePath: dirname(__DIR__))
         $exceptions->render(function (NotFoundHttpException $e, Request $request) {
             if ($request->is('api/*') || $request->expectsJson()) {
                 return ApiResponse::notFound('Resource not found.', 'NOT_FOUND');
+            }
+        });
+
+        $exceptions->render(function (ExternalServiceException $e, Request $request) {
+            if ($request->is('api/*') || $request->expectsJson()) {
+                return ApiResponse::error(
+                    $e->getMessage(),
+                    $e->errorCode ?? 'EXTERNAL_SERVICE_ERROR',
+                    $e->statusCode,
+                    $e->context,
+                );
             }
         });
 

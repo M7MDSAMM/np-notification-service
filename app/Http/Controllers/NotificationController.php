@@ -2,22 +2,25 @@
 
 namespace App\Http\Controllers;
 
+use App\Exceptions\ExternalServiceException;
 use App\Http\Requests\NotificationCreateRequest;
 use App\Http\Responses\ApiResponse;
+use App\Services\Contracts\NotificationOrchestratorInterface;
 use App\Services\Contracts\NotificationServiceInterface;
 use Illuminate\Http\JsonResponse;
 
 class NotificationController extends Controller
 {
     public function __construct(
+        private readonly NotificationOrchestratorInterface $orchestrator,
         private readonly NotificationServiceInterface $notificationService,
     ) {}
 
     public function store(NotificationCreateRequest $request): JsonResponse
     {
-        $notification = $this->notificationService->create($request->validated());
+        $result = $this->orchestrator->createNotification($request->validated());
 
-        return ApiResponse::created($notification, 'Notification created.');
+        return ApiResponse::created($result, 'Notification created.');
     }
 
     public function show(string $uuid): JsonResponse
