@@ -22,6 +22,7 @@ Route::get('/health', fn () => ApiResponse::success([
 ]));
 
 Route::middleware('jwt.admin')->group(function () {
+    Route::get('/notifications', [NotificationController::class, 'index']);
     Route::post('/notifications', [NotificationController::class, 'store']);
     Route::get('/notifications/{uuid}', [NotificationController::class, 'show']);
     Route::post('/notifications/{uuid}/retry', [NotificationController::class, 'retry']);

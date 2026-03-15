@@ -8,6 +8,7 @@ use App\Http\Responses\ApiResponse;
 use App\Services\Contracts\NotificationOrchestratorInterface;
 use App\Services\Contracts\NotificationServiceInterface;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
 
 class NotificationController extends Controller
 {
@@ -15,6 +16,16 @@ class NotificationController extends Controller
         private readonly NotificationOrchestratorInterface $orchestrator,
         private readonly NotificationServiceInterface $notificationService,
     ) {}
+
+    public function index(Request $request): JsonResponse
+    {
+        $filters = $request->only(['status', 'user_uuid', 'template_key']);
+        $perPage = (int) $request->query('per_page', 15);
+
+        $notifications = $this->notificationService->list($filters, $perPage);
+
+        return ApiResponse::success($notifications, 'Notifications retrieved.');
+    }
 
     public function store(NotificationCreateRequest $request): JsonResponse
     {

@@ -4,10 +4,35 @@ namespace App\Services\Implementations;
 
 use App\Models\Notification;
 use App\Services\Contracts\NotificationServiceInterface;
+use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Support\Facades\Log;
 
 class NotificationService implements NotificationServiceInterface
 {
+    public function list(array $filters = [], int $perPage = 15): LengthAwarePaginator
+    {
+        $query = Notification::with('attempts')->latest();
+
+        if (! empty($filters['status'])) {
+            $query->where('status', $filters['status']);
+        }
+
+        if (! empty($filters['user_uuid'])) {
+            $query->where('user_uuid', $filters['user_uuid']);
+        }
+
+        if (! empty($filters['template_key'])) {
+            $query->where('template_key', $filters['template_key']);
+        }
+
+        Log::info('notification.listed', [
+            'filters'        => $filters,
+            'correlation_id' => request()->header('X-Correlation-Id'),
+        ]);
+
+        return $query->paginate($perPage);
+    }
+
     public function create(array $payload): Notification
     {
         $notification = Notification::create($payload);
@@ -25,7 +50,7 @@ class NotificationService implements NotificationServiceInterface
 
     public function findByUuid(string $uuid): Notification
     {
-        $notification = Notification::where('uuid', $uuid)->firstOrFail();
+        $notification = Notification::with('attempts')->where('uuid', $uuid)->firstOrFail();
 
         Log::info('notification.viewed', [
             'notification_uuid' => $notification->uuid,
